@@ -1,3 +1,4 @@
+
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -11,23 +12,40 @@ app.use(express.json());
 
 const client = new MongoClient(process.env.MONGODB_URI);
 
+let pizzasCollection;
+
 export async function connectToMongoDB() {
-    try {
-        await client.connect();
-        console.log("MongoDB Connected");
+  try {
+    await client.connect();
+    console.log("MongoDB Connected");
 
-        const db = client.db("yourDatabase");
+    const db = client.db("pizzora");
+    pizzasCollection = db.collection("pizzas");
 
-        return db;
-    } catch (error) {
-        console.log(error);
-    }
+    return db;
+  } catch (error) {
+    console.log(error);
+    throw error;
+  }
 }
 
-app.get("/", (req, res) => {
-    res.send("Server is running");
+// All Pizza
+// Link: http://localhost:5000/pizzas
+app.get("/pizzas", async (req, res) => {
+    const result = await pizzasCollection.find().toArray();
+    res.send(result);
 });
 
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+app.get("/", (req, res) => {
+  res.send("Server is running");
 });
+
+const startServer = async () => {
+  await connectToMongoDB();
+
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+};
+
+startServer();

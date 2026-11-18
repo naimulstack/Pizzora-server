@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "skills": {
+    "jwt-decode": {
+      "source": "jsonwebtoken/jwt-skills",
+      "commit": "edca959b83f0024d52896ded3ce77aadcb8c7d2b",
+      "sourceType": "github",
+      "skillPath": "jwt-decode/SKILL.md",
+      "computedHash": "655ab0f7c9eb28bb5d3c736f08e9128696b5f39d5e291dca47e61ce1655cbaf9"
+    }
+  }
+}
