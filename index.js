@@ -7,6 +7,7 @@ import { MongoClient } from "mongodb";
 import { auth } from "./lib/auth.js";
 import pizzaRoutes from "./routes/pizzas.js";
 import adminRoutes from "./routes/admin.js";
+import vendorRoutes from "./routes/vendor.js";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -38,6 +39,7 @@ const startServer = async () => {
 
   pizzaRoutes(app, db);
   adminRoutes(app, db);
+  vendorRoutes(app, db)
 
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
