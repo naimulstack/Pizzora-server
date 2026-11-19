@@ -1,7 +1,10 @@
+
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import { toNodeHandler } from "better-auth/node";
 import { MongoClient } from "mongodb";
+import { auth } from "./lib/auth.js";
 import pizzaRoutes from "./routes/pizzas.js";
 import adminRoutes from "./routes/admin.js";
 
@@ -15,6 +18,9 @@ app.use(
     credentials: true,
   })
 );
+
+app.all("/api/auth/*splat", toNodeHandler(auth));
+
 app.use(express.json());
 
 export async function connectToMongoDB() {
