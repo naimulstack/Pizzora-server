@@ -60,7 +60,20 @@ export default function vendorRoutes(app, db) {
   // Vendor Pizzas
   app.get("/vendor/pizzas", async (req, res) => {
     try {
-      const filter = buildVendorFilter(req.query);
+      const { email = "", vendor = "" } = req.query;
+      const conditions = [];
+
+      if (email.trim()) {
+        conditions.push({ vendorEmail: email.trim() }, { email: email.trim() });
+      }
+      if (vendor.trim()) {
+        conditions.push(
+          { vendor: new RegExp(vendor.trim(), "i") },
+          { vendorName: new RegExp(vendor.trim(), "i") },
+        );
+      }
+
+      const filter = conditions.length > 0 ? { $or: conditions } : {};
       const pizzas = await pizzasCollection
         .find(filter)
         .sort({ createdAt: -1 })
@@ -68,10 +81,12 @@ export default function vendorRoutes(app, db) {
 
       res.send(pizzas);
     } catch (error) {
-      res.status(500).send({
-        message: "Failed to fetch vendor pizzas",
-        error: error.message,
-      });
+      res
+        .status(500)
+        .send({
+          message: "Failed to fetch vendor pizzas",
+          error: error.message,
+        });
     }
   });
 

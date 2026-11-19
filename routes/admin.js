@@ -232,6 +232,46 @@ export default function adminRoutes(app, db) {
 
     res.send({ success: true, message: "User unblocked successfully", result });
   });
+
+  // Update User Role (customer | vendor | admin)
+  app.patch("/admin/users/:id/role", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { role } = req.body;
+
+      if (!["customer", "vendor", "admin"].includes(role)) {
+        return res
+          .status(400)
+          .send({ success: false, message: "Invalid role" });
+      }
+
+      if (!ObjectId.isValid(id)) {
+        return res
+          .status(400)
+          .send({ success: false, message: "Invalid user ID" });
+      }
+
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { role, updatedAt: new Date() } },
+      );
+
+      if (result.matchedCount === 0) {
+        return res
+          .status(404)
+          .send({ success: false, message: "User not found" });
+      }
+
+      res.send({
+        success: true,
+        message: `User role updated to ${role}`,
+        role,
+        result,
+      });
+    } catch (error) {
+      res.status(500).send({ success: false, message: error.message });
+    }
+  });
   // Get All Vendors
   app.get("/admin/vendors", async (req, res) => {
     const { search = "", status = "All" } = req.query;
