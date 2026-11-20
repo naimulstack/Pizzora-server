@@ -1,20 +1,25 @@
 import { ObjectId } from "mongodb";
-import { requireAuth } from "../middleware/authMiddleware.js";
+
+const escapeRegex = (str = "") =>
+  String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 export default function pizzaRoutes(app, db) {
   const pizzasCollection = db.collection("pizzas");
   const notificationsCollection = db.collection("notifications");
 
-  // Get Approved Pizzas
   app.get("/pizzas", async (req, res) => {
     const pizzas = await pizzasCollection
       .find({ status: "approved" })
+      .sort({ createdAt: -1 })
       .toArray();
     res.send(pizzas);
   });
 
-  // Get Single Approved Pizza
   app.get("/pizzas/:id", async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).send({ message: "Invalid pizza ID" });
+    }
+
     const pizza = await pizzasCollection.findOne({
       _id: new ObjectId(req.params.id),
       status: "approved",
@@ -22,7 +27,6 @@ export default function pizzaRoutes(app, db) {
     res.send(pizza);
   });
 
-  // Vendor Submit Pizza
   app.post("/vendor/pizzas", async (req, res) => {
     const {
       name,
@@ -38,24 +42,36 @@ export default function pizzaRoutes(app, db) {
       isAvailable,
       vendorId,
       vendorEmail,
+      email,
       vendorName,
       companyName,
     } = req.body;
 
+    const resolvedEmail = String(vendorEmail || email || "")
+      .trim()
+      .toLowerCase();
+
+    if (!resolvedEmail) {
+      return res.status(400).send({
+        success: false,
+        message: "Vendor email is required to submit a pizza.",
+      });
+    }
+
     const pizzaData = {
-      name,
-      category,
-      price: Number(price),
+      name: String(name || "").trim(),
+      category: String(category || "").trim(),
+      price: Number(price) || 0,
       discountPrice: discountPrice ? Number(discountPrice) : null,
-      image,
-      description,
-      ingredients,
-      sizes,
-      preparationTime: Number(preparationTime),
-      location,
-      isAvailable: Boolean(isAvailable),
+      image: image || "",
+      description: description || "",
+      ingredients: ingredients || "",
+      sizes: sizes || [],
+      preparationTime: Number(preparationTime) || 20,
+      location: location || "",
+      isAvailable: isAvailable !== undefined ? Boolean(isAvailable) : true,
       vendorId: vendorId || null,
-      vendorEmail,
+      vendorEmail: resolvedEmail,
       vendorName: vendorName || "",
       companyName: companyName || "",
       status: "pending",
@@ -71,23 +87,39 @@ export default function pizzaRoutes(app, db) {
       recipientId: null,
       type: "pizza_request",
       title: "New Pizza Approval Request",
-      message: `${companyName || vendorName || vendorEmail} submitted a new pizza: ${name}`,
+      message: `${
+        companyName || vendorName || resolvedEmail
+      } submitted a new pizza: ${pizzaData.name}`,
       pizzaId: result.insertedId,
       isRead: false,
       createdAt: new Date(),
     });
 
-    res.send({
+    res.status(201).send({
       success: true,
       message: "Pizza submitted for admin approval",
       insertedId: result.insertedId,
+      pizza: { ...pizzaData, _id: result.insertedId },
     });
   });
-  app.get("/vendor/pizzas", requireAuth(db), async (req, res) => {
+
+  app.get("/vendor/pizzas", async (req, res) => {
+    const emailParam = String(req.query.email || "").trim().toLowerCase();
+    const vendorParam = String(req.query.vendor || "").trim();
+
+    const filter = {};
+    if (emailParam) {
+      const regex = new RegExp(`^${escapeRegex(emailParam)}$`, "i");
+      filter.$or = [{ vendorEmail: regex }, { email: regex }];
+    } else if (vendorParam) {
+      filter.vendorName = new RegExp(`^${escapeRegex(vendorParam)}$`, "i");
+    }
+
     const pizzas = await pizzasCollection
-      .find({ vendorEmail: req.user.email })
+      .find(filter)
       .sort({ createdAt: -1 })
       .toArray();
+
     res.send(pizzas);
   });
 }

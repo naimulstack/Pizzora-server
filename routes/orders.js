@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 
 export default function orderRoutes(app, db) {
   const ordersCollection = db.collection("orders");
+  const notificationsCollection = db.collection("notifications");
 
   // Get All Orders
   app.get("/orders", async (req, res) => {
@@ -19,7 +20,7 @@ export default function orderRoutes(app, db) {
       }
 
       if (vendorEmail.trim()) {
-        query.vendorEmail = vendorEmail.trim();
+        query.vendorEmail = vendorEmail.trim().toLowerCase();
       }
 
       if (search.trim()) {
@@ -29,6 +30,7 @@ export default function orderRoutes(app, db) {
           { customerName: regex },
           { customer: regex },
           { vendor: regex },
+          { vendorEmail: regex },
         ];
       }
 
@@ -45,21 +47,36 @@ export default function orderRoutes(app, db) {
     }
   });
 
-  // Create New Order
+  // Create New Order -> Notify Admin
   app.post("/orders", async (req, res) => {
     try {
+      const now = new Date();
+      const orderId =
+        req.body.orderId ||
+        `PZ-${Math.floor(100000 + Math.random() * 900000)}`;
+
       const orderData = {
         ...req.body,
-        orderId:
-          req.body.orderId ||
-          `PZ-${Math.floor(100000 + Math.random() * 900000)}`,
-        status: req.body.status || "Pending",
+        orderId,
+        status: req.body.status || "Pending Admin Review",
         vendor: req.body.vendor || "",
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        vendorEmail: (req.body.vendorEmail || "").trim().toLowerCase(),
+        createdAt: now,
+        updatedAt: now,
       };
 
       const result = await ordersCollection.insertOne(orderData);
+
+      await notificationsCollection.insertOne({
+        recipientRole: "admin",
+        type: "new_order",
+        title: "New Order Received",
+        message: `Order ${orderId} received (${req.body.customerName || req.body.email || "Customer"}).`,
+        orderId: result.insertedId,
+        isRead: false,
+        createdAt: now,
+      });
+
       res.status(201).send({
         success: true,
         insertedId: result.insertedId,
@@ -72,7 +89,7 @@ export default function orderRoutes(app, db) {
     }
   });
 
-  // Update Order Status / Assign Vendor
+  // Update Order Status / Transfer to Vendor -> Notify Vendor
   app.patch("/orders/:id/status", async (req, res) => {
     try {
       const { id } = req.params;
@@ -82,22 +99,44 @@ export default function orderRoutes(app, db) {
           .send({ success: false, message: "Invalid order ID" });
       }
 
+      const existingOrder = await ordersCollection.findOne({
+        _id: new ObjectId(id),
+      });
+      if (!existingOrder) {
+        return res
+          .status(404)
+          .send({ success: false, message: "Order not found" });
+      }
+
       const { status, vendor, vendorEmail } = req.body;
-      const updateFields = { updatedAt: new Date() };
+      const now = new Date();
+      const updateFields = { updatedAt: now };
 
       if (status) updateFields.status = status;
-      if (vendor !== undefined) updateFields.vendor = vendor;
-      if (vendorEmail !== undefined) updateFields.vendorEmail = vendorEmail;
+      if (vendor !== undefined) updateFields.vendor = String(vendor).trim();
+      if (vendorEmail !== undefined) {
+        updateFields.vendorEmail = String(vendorEmail).trim().toLowerCase();
+      }
 
       const result = await ordersCollection.updateOne(
         { _id: new ObjectId(id) },
         { $set: updateFields }
       );
 
-      if (result.matchedCount === 0) {
-        return res
-          .status(404)
-          .send({ success: false, message: "Order not found" });
+      const assignedEmail =
+        updateFields.vendorEmail || existingOrder.vendorEmail || "";
+
+      if (assignedEmail) {
+        await notificationsCollection.insertOne({
+          recipientRole: "vendor",
+          recipientEmail: assignedEmail,
+          type: "order_transferred",
+          title: "New Order Transferred",
+          message: `Order ${existingOrder.orderId || id} has been assigned to your kitchen.`,
+          orderId: existingOrder._id,
+          isRead: false,
+          createdAt: now,
+        });
       }
 
       res.send({ success: true, result });
