@@ -11,26 +11,18 @@ export default function orderRoutes(app, db) {
         req.query;
       const query = {};
 
-      if (status && status !== "All") {
-        query.status = status;
-      }
-
-      if (vendor.trim()) {
-        query.vendor = new RegExp(vendor.trim(), "i");
-      }
-
-      if (vendorEmail.trim()) {
-        query.vendorEmail = vendorEmail.trim().toLowerCase();
-      }
+      if (status && status !== "All") query.status = status;
+      if (vendor.trim()) query.vendor = new RegExp(vendor.trim(), "i");
+      if (vendorEmail.trim()) query.vendorEmail = vendorEmail.trim().toLowerCase();
 
       if (search.trim()) {
         const regex = new RegExp(search.trim(), "i");
         query.$or = [
           { orderId: regex },
           { customerName: regex },
-          { customer: regex },
+          { customerEmail: regex },
+          { phone: regex },
           { vendor: regex },
-          { vendorEmail: regex },
         ];
       }
 
@@ -47,17 +39,49 @@ export default function orderRoutes(app, db) {
     }
   });
 
-  // Create New Order -> Notify Admin
+  // Create New Order (COD & Stripe)
   app.post("/orders", async (req, res) => {
     try {
+      const {
+        items = [],
+        subtotal = 0,
+        deliveryFee = 0,
+        total = 0,
+        phone = "",
+        address = "",
+        paymentMethod = "cod",
+        paymentStatus = "unpaid",
+        sessionId = "",
+        customerEmail = "",
+        customerName = "Customer",
+      } = req.body;
+
+      // Stripe page refresh korle jeno duplicate order na hoy
+      if (sessionId) {
+        const existing = await ordersCollection.findOne({ sessionId });
+        if (existing) {
+          return res.send({ success: true, order: existing, duplicate: true });
+        }
+      }
+
       const now = new Date();
       const orderId =
         req.body.orderId ||
         `PZ-${Math.floor(100000 + Math.random() * 900000)}`;
 
       const orderData = {
-        ...req.body,
         orderId,
+        customerName,
+        customerEmail: customerEmail.trim().toLowerCase(),
+        phone: String(phone).trim(),
+        address: String(address).trim(),
+        items,
+        subtotal: Number(subtotal),
+        deliveryFee: Number(deliveryFee),
+        total: Number(total),
+        paymentMethod,
+        paymentStatus,
+        ...(sessionId ? { sessionId } : {}),
         status: req.body.status || "Pending Admin Review",
         vendor: req.body.vendor || "",
         vendorEmail: (req.body.vendorEmail || "").trim().toLowerCase(),
@@ -71,7 +95,7 @@ export default function orderRoutes(app, db) {
         recipientRole: "admin",
         type: "new_order",
         title: "New Order Received",
-        message: `Order ${orderId} received (${req.body.customerName || req.body.email || "Customer"}).`,
+        message: `Order ${orderId} (৳${orderData.total} - ${paymentMethod.toUpperCase()}) received.`,
         orderId: result.insertedId,
         isRead: false,
         createdAt: now,
