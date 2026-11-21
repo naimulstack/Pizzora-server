@@ -1,3 +1,4 @@
+import { ObjectId } from "mongodb";
 import { fromNodeHeaders } from "better-auth/node";
 import { auth } from "../lib/auth.js";
 
@@ -14,7 +15,10 @@ export function requireAuth(db) {
       return res.status(401).send({ message: "Please login first" });
     }
 
-    const user = await usersCollection.findOne({ _id: session.user.id });
+    const userId = session.user.id;
+    const user = await usersCollection.findOne({
+      _id: userId instanceof ObjectId ? userId : new ObjectId(String(userId)),
+    });
 
     if (!user) {
       return res.status(401).send({ message: "User not found" });

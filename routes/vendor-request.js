@@ -1,5 +1,8 @@
 import { ObjectId } from "mongodb";
 
+const escapeRegex = (str = "") =>
+  str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 export default function vendorRequestRoutes(app, db) {
   const requestsCollection = db.collection("vendor_requests");
   const usersCollection = db.collection("users");
@@ -86,6 +89,7 @@ export default function vendorRequestRoutes(app, db) {
       title: "New Vendor Request",
       message: `${requestDoc.ownerName} requested to become a vendor (${requestDoc.shopName}).`,
       requestId: result.insertedId,
+      vendorId: result.insertedId,
       userEmail: normalizedEmail,
       isRead: false,
       createdAt: new Date(),
@@ -146,83 +150,115 @@ export default function vendorRequestRoutes(app, db) {
     res.send(approvedRequests);
   });
 
-app.patch("/vendor-requests/:id", async (req, res) => {
-  const { id } = req.params;
-  if (!ObjectId.isValid(id)) {
-    return res
-      .status(400)
-      .send({ success: false, message: "Invalid request ID" });
-  }
+  app.patch("/vendor-requests/:id", async (req, res) => {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .send({ success: false, message: "Invalid request ID" });
+    }
 
-  const requestDoc = await requestsCollection.findOne({
-    _id: new ObjectId(id),
-  });
+    const requestDoc = await requestsCollection.findOne({
+      _id: new ObjectId(id),
+    });
 
-  if (!requestDoc) {
-    return res
-      .status(404)
-      .send({ success: false, message: "Vendor request not found" });
-  }
+    if (!requestDoc) {
+      return res
+        .status(404)
+        .send({ success: false, message: "Vendor request not found" });
+    }
 
-  const now = new Date();
+    const nextStatus =
+      String(req.body?.status || "approved").trim().toLowerCase() === "rejected"
+        ? "rejected"
+        : "approved";
 
-  await requestsCollection.updateOne(
-    { _id: new ObjectId(id) },
-    { $set: { status: "approved", approvedAt: now, updatedAt: now } }
-  );
+    const now = new Date();
 
-  const normalizedEmail = (requestDoc.userEmail || requestDoc.email || "")
-    .trim()
-    .toLowerCase();
-
-  if (normalizedEmail) {
-    await userCollection.updateOne(
-      { email: normalizedEmail },
+    await requestsCollection.updateOne(
+      { _id: new ObjectId(id) },
       {
         $set: {
-          role: "vendor",
+          status: nextStatus,
+          ...(nextStatus === "approved" ? { approvedAt: now } : {}),
           updatedAt: now,
         },
       }
     );
 
-    await usersCollection.updateOne(
-      { email: normalizedEmail },
-      {
-        $set: {
-          role: "vendor",
-          companyName: requestDoc.shopName || "",
-          vendorName: requestDoc.shopName || "",
-          updatedAt: now,
-        },
+    const normalizedEmail = (requestDoc.userEmail || requestDoc.email || "")
+      .trim()
+      .toLowerCase();
+
+    if (nextStatus === "approved") {
+      const userFilterConditions = [];
+
+      if (normalizedEmail) {
+        userFilterConditions.push({
+          email: new RegExp(`^${escapeRegex(normalizedEmail)}$`, "i"),
+        });
       }
-    );
 
-    await vendorsCollection.updateOne(
-      { email: normalizedEmail },
-      {
-        $set: {
-          requestId: requestDoc._id,
-          userId: requestDoc.userId || "",
-          email: normalizedEmail,
-          ownerName: requestDoc.ownerName || requestDoc.userName || "",
-          shopName: requestDoc.shopName || "",
-          businessType: requestDoc.businessType || "",
-          phone: requestDoc.phone || "",
-          location: requestDoc.location || requestDoc.cityArea || "",
-          status: "active",
-          updatedAt: now,
-        },
-        $setOnInsert: { createdAt: now },
-      },
-      { upsert: true }
-    );
-  }
+      if (requestDoc.userId) {
+        userFilterConditions.push(
+          { _id: requestDoc.userId },
+          { id: requestDoc.userId }
+        );
+        if (ObjectId.isValid(requestDoc.userId)) {
+          userFilterConditions.push({ _id: new ObjectId(requestDoc.userId) });
+        }
+      }
 
-  res.send({
-    success: true,
-    status: "approved",
-    message: "Vendor approved and user role updated to vendor.",
+      if (userFilterConditions.length > 0) {
+        await Promise.all([
+          userCollection.updateMany(
+            { $or: userFilterConditions },
+            { $set: { role: "vendor", updatedAt: now } }
+          ),
+          usersCollection.updateMany(
+            { $or: userFilterConditions },
+            {
+              $set: {
+                role: "vendor",
+                companyName: requestDoc.shopName || "",
+                vendorName: requestDoc.shopName || "",
+                updatedAt: now,
+              },
+            }
+          ),
+        ]);
+      }
+
+      if (normalizedEmail) {
+        await vendorsCollection.updateOne(
+          { email: new RegExp(`^${escapeRegex(normalizedEmail)}$`, "i") },
+          {
+            $set: {
+              requestId: requestDoc._id,
+              userId: requestDoc.userId || "",
+              email: normalizedEmail,
+              ownerName: requestDoc.ownerName || requestDoc.userName || "",
+              shopName: requestDoc.shopName || "",
+              businessType: requestDoc.businessType || "",
+              phone: requestDoc.phone || "",
+              location: requestDoc.location || requestDoc.cityArea || "",
+              status: "active",
+              updatedAt: now,
+            },
+            $setOnInsert: { createdAt: now },
+          },
+          { upsert: true }
+        );
+      }
+    }
+
+    res.send({
+      success: true,
+      status: nextStatus,
+      message:
+        nextStatus === "approved"
+          ? "Vendor approved and user role updated to vendor."
+          : "Vendor request rejected.",
+    });
   });
-});
 }

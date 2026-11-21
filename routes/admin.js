@@ -1,10 +1,12 @@
 import { ObjectId } from "mongodb";
+import { requireAdmin } from "../middleware/authMiddleware.js";
 
 export default function adminRoutes(app, db) {
   const usersCollection = db.collection("user");
   const pizzasCollection = db.collection("pizzas");
   const ordersCollection = db.collection("orders");
   const notificationsCollection = db.collection("notifications");
+  const adminOnly = requireAdmin(db);
 
   // Admin Dashboard Statistics (All Dashboard Data)
   app.get("/admin/stats", async (req, res) => {
@@ -112,6 +114,44 @@ export default function adminRoutes(app, db) {
         .status(500)
         .send({ message: "Failed to load admin stats", error: error.message });
     }
+  });
+
+  // Get Admin Notifications
+  app.get("/admin/notifications", ...adminOnly, async (req, res) => {
+    const notifications = await notificationsCollection
+      .find({ recipientRole: "admin" })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(notifications);
+  });
+
+  // Mark Single Notification as Read
+  app.patch("/admin/notifications/:id/read", ...adminOnly, async (req, res) => {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).send({ success: false, message: "Invalid ID" });
+    }
+
+    const result = await notificationsCollection.updateOne(
+      { _id: new ObjectId(req.params.id), recipientRole: "admin" },
+      { $set: { isRead: true, readAt: new Date() } },
+    );
+
+    res.send({ success: true, message: "Notification marked as read", result });
+  });
+
+  // Mark All Notifications as Read
+  app.patch("/admin/notifications/read-all", ...adminOnly, async (req, res) => {
+    const result = await notificationsCollection.updateMany(
+      { recipientRole: "admin", isRead: false },
+      { $set: { isRead: true, readAt: new Date() } },
+    );
+
+    res.send({
+      success: true,
+      message: "All notifications marked as read",
+      modifiedCount: result.modifiedCount,
+    });
   });
 
   // Get Pending Pizza Requests

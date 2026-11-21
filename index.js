@@ -47,6 +47,14 @@ const startServer = async () => {
   orderRoutes(app, db)
   notificationRoutes(app, db);
 
+  app.use((err, req, res, next) => {
+    console.error("Unhandled error:", err);
+    res.status(err.status || 500).send({
+      success: false,
+      message: err.message || "Internal Server Error",
+    });
+  });
+
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
