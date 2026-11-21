@@ -7,13 +7,18 @@ export default function orderRoutes(app, db) {
   // Get All Orders
   app.get("/orders", async (req, res) => {
     try {
-      const { search = "", status = "All", vendor = "", vendorEmail = "" } =
-        req.query;
+      const {
+        search = "",
+        status = "All",
+        vendor = "",
+        vendorEmail = "",
+      } = req.query;
       const query = {};
 
       if (status && status !== "All") query.status = status;
       if (vendor.trim()) query.vendor = new RegExp(vendor.trim(), "i");
-      if (vendorEmail.trim()) query.vendorEmail = vendorEmail.trim().toLowerCase();
+      if (vendorEmail.trim())
+        query.vendorEmail = vendorEmail.trim().toLowerCase();
 
       if (search.trim()) {
         const regex = new RegExp(search.trim(), "i");
@@ -36,6 +41,35 @@ export default function orderRoutes(app, db) {
       res
         .status(500)
         .send({ message: "Failed to fetch orders", error: error.message });
+    }
+  });
+
+  // Get Single Order by Mongo _id or orderId (e.g. PZ-123456)
+  app.get("/orders/:orderId", async (req, res) => {
+    try {
+      const { orderId } = req.params;
+      let order = null;
+
+      if (ObjectId.isValid(orderId)) {
+        order = await ordersCollection.findOne({ _id: new ObjectId(orderId) });
+      }
+
+      if (!order) {
+        order = await ordersCollection.findOne({ orderId });
+      }
+
+      if (!order) {
+        return res.status(404).send({ message: "Order not found" });
+      }
+
+      res.send(order);
+    } catch (error) {
+      res
+        .status(500)
+        .send({
+          message: "Failed to fetch order details",
+          error: error.message,
+        });
     }
   });
 
@@ -66,8 +100,7 @@ export default function orderRoutes(app, db) {
 
       const now = new Date();
       const orderId =
-        req.body.orderId ||
-        `PZ-${Math.floor(100000 + Math.random() * 900000)}`;
+        req.body.orderId || `PZ-${Math.floor(100000 + Math.random() * 900000)}`;
 
       const orderData = {
         orderId,
@@ -144,7 +177,7 @@ export default function orderRoutes(app, db) {
 
       const result = await ordersCollection.updateOne(
         { _id: new ObjectId(id) },
-        { $set: updateFields }
+        { $set: updateFields },
       );
 
       const assignedEmail =
@@ -181,7 +214,9 @@ export default function orderRoutes(app, db) {
           .send({ success: false, message: "Invalid order ID" });
       }
 
-      const result = await ordersCollection.deleteOne({ _id: new ObjectId(id) });
+      const result = await ordersCollection.deleteOne({
+        _id: new ObjectId(id),
+      });
       if (result.deletedCount === 0) {
         return res
           .status(404)

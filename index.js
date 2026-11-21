@@ -10,6 +10,7 @@ import adminRoutes from "./routes/admin.js";
 import vendorRoutes from "./routes/vendor.js";
 import vendorRequestRoutes from "./routes/vendor-request.js"
 import orderRoutes from "./routes/orders.js"
+import notificationRoutes from "./routes/notification.js"
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -44,6 +45,7 @@ const startServer = async () => {
   vendorRoutes(app, db)
   vendorRequestRoutes(app, db);
   orderRoutes(app, db)
+  notificationRoutes(app, db);
 
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
