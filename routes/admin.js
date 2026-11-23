@@ -1,177 +1,174 @@
+
 import { ObjectId } from "mongodb";
 import { requireAdmin } from "../middleware/authMiddleware.js";
+
+const escapeRegex = (value) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 export default function adminRoutes(app, db) {
   const usersCollection = db.collection("user");
   const pizzasCollection = db.collection("pizzas");
   const ordersCollection = db.collection("orders");
   const notificationsCollection = db.collection("notifications");
-  const adminOnly = requireAdmin(db);
+  const settingsCollection = db.collection("settings");
 
-  // Admin Dashboard Statistics (All Dashboard Data)
-  app.get("/admin/stats", async (req, res) => {
-    try {
-      const [
-        totalUsers,
-        totalVendors,
-        totalCustomers,
-        totalPizzas,
-        pendingPizzas,
-        approvedPizzas,
-        rejectedPizzas,
-        totalOrders,
-        revenueResult,
-        statusAgg,
-        monthlyAgg,
-        recentOrders,
-        unreadNotifications,
-      ] = await Promise.all([
-        usersCollection.countDocuments(),
-        usersCollection.countDocuments({ role: "vendor" }),
-        usersCollection.countDocuments({ role: "customer" }),
-        pizzasCollection.countDocuments(),
-        pizzasCollection.countDocuments({ status: "pending" }),
-        pizzasCollection.countDocuments({ status: "approved" }),
-        pizzasCollection.countDocuments({ status: "rejected" }),
-        ordersCollection.countDocuments(),
-        ordersCollection
-          .aggregate([
-            {
-              $group: {
-                _id: null,
-                total: { $sum: { $ifNull: ["$total", "$totalPrice"] } },
-              },
+  const admin = requireAdmin(db);
+
+  // Admin Dashboard Stats
+  app.get("/admin/stats", ...admin, async (req, res) => {
+    const [
+      totalUsers,
+      totalVendors,
+      totalCustomers,
+      totalPizzas,
+      pendingPizzas,
+      approvedPizzas,
+      rejectedPizzas,
+      totalOrders,
+      revenue,
+      statusAgg,
+      monthlyAgg,
+      recentOrders,
+      unreadNotifications,
+    ] = await Promise.all([
+      usersCollection.countDocuments(),
+      usersCollection.countDocuments({ role: "vendor" }),
+      usersCollection.countDocuments({ role: "customer" }),
+      pizzasCollection.countDocuments(),
+      pizzasCollection.countDocuments({ status: "pending" }),
+      pizzasCollection.countDocuments({ status: "approved" }),
+      pizzasCollection.countDocuments({ status: "rejected" }),
+      ordersCollection.countDocuments(),
+
+      ordersCollection.aggregate([
+        {
+          $group: {
+            _id: null,
+            total: { $sum: { $ifNull: ["$total", "$totalPrice"] } },
+          },
+        },
+      ]).toArray(),
+
+      ordersCollection.aggregate([
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]).toArray(),
+
+      ordersCollection.aggregate([
+        {
+          $group: {
+            _id: {
+              year: { $year: "$createdAt" },
+              month: { $month: "$createdAt" },
             },
-          ])
-          .toArray(),
-        ordersCollection
-          .aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }])
-          .toArray(),
-        ordersCollection
-          .aggregate([
-            {
-              $group: {
-                _id: {
-                  year: { $year: "$createdAt" },
-                  month: { $month: "$createdAt" },
-                },
-                total: { $sum: { $ifNull: ["$total", "$totalPrice"] } },
-              },
-            },
-            { $sort: { "_id.year": -1, "_id.month": -1 } },
-            { $limit: 7 },
-          ])
-          .toArray(),
-        ordersCollection.find().sort({ createdAt: -1 }).limit(5).toArray(),
-        notificationsCollection.countDocuments({
-          recipientRole: "admin",
-          isRead: false,
-        }),
-      ]);
+            total: { $sum: { $ifNull: ["$total", "$totalPrice"] } },
+          },
+        },
+        { $sort: { "_id.year": -1, "_id.month": -1 } },
+        { $limit: 7 },
+      ]).toArray(),
 
-      const monthNames = [
-        "Jan",
-        "Feb",
-        "Mar",
-        "Apr",
-        "May",
-        "Jun",
-        "Jul",
-        "Aug",
-        "Sep",
-        "Oct",
-        "Nov",
-        "Dec",
-      ];
+      ordersCollection.find().sort({ createdAt: -1 }).limit(5).toArray(),
 
-      const monthlySales = monthlyAgg.reverse().map((item) => ({
-        month: monthNames[item._id.month - 1] || "N/A",
-        total: item.total,
-      }));
+      notificationsCollection.countDocuments({
+        recipientRole: "admin",
+        isRead: false,
+      }),
+    ]);
 
-      const orderSummary = statusAgg.reduce((acc, item) => {
-        if (item._id) acc[item._id] = item.count;
-        return acc;
-      }, {});
+    const months = [
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
 
-      res.send({
-        totalUsers,
-        totalVendors,
-        totalCustomers,
-        totalPizzas,
-        pendingPizzas,
-        approvedPizzas,
-        rejectedPizzas,
-        totalOrders,
-        totalRevenue: revenueResult[0]?.total || 0,
-        orderSummary,
-        monthlySales,
-        recentOrders,
-        unreadNotifications,
-      });
-    } catch (error) {
-      res
-        .status(500)
-        .send({ message: "Failed to load admin stats", error: error.message });
-    }
+    const monthlySales = monthlyAgg.reverse().map((item) => ({
+      month: months[item._id.month - 1],
+      total: item.total,
+    }));
+
+    const orderSummary = Object.fromEntries(
+      statusAgg.filter((item) => item._id).map((item) => [
+        item._id,
+        item.count,
+      ])
+    );
+
+    return res.send({
+      totalUsers,
+      totalVendors,
+      totalCustomers,
+      totalPizzas,
+      pendingPizzas,
+      approvedPizzas,
+      rejectedPizzas,
+      totalOrders,
+      totalRevenue: revenue[0]?.total || 0,
+      orderSummary,
+      monthlySales,
+      recentOrders,
+      unreadNotifications,
+    });
   });
 
-  // Get Admin Notifications
-  app.get("/admin/notifications", ...adminOnly, async (req, res) => {
+  // Get Notifications
+  app.get("/admin/notifications", ...admin, async (req, res) => {
     const notifications = await notificationsCollection
       .find({ recipientRole: "admin" })
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.send(notifications);
+    return res.send(notifications);
   });
 
-  // Mark Single Notification as Read
-  app.patch("/admin/notifications/:id/read", ...adminOnly, async (req, res) => {
-    if (!ObjectId.isValid(req.params.id)) {
-      return res.status(400).send({ success: false, message: "Invalid ID" });
+  // Mark Notification as Read
+  app.patch("/admin/notifications/:id/read", ...admin, async (req, res) => {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid ID" });
     }
 
-    const result = await notificationsCollection.updateOne(
-      { _id: new ObjectId(req.params.id), recipientRole: "admin" },
-      { $set: { isRead: true, readAt: new Date() } },
+    await notificationsCollection.updateOne(
+      { _id: new ObjectId(id), recipientRole: "admin" },
+      { $set: { isRead: true, readAt: new Date() } }
     );
 
-    res.send({ success: true, message: "Notification marked as read", result });
+    return res.send({ success: true, message: "Notification marked as read" });
   });
 
   // Mark All Notifications as Read
-  app.patch("/admin/notifications/read-all", ...adminOnly, async (req, res) => {
+  app.patch("/admin/notifications/read-all", ...admin, async (req, res) => {
     const result = await notificationsCollection.updateMany(
       { recipientRole: "admin", isRead: false },
-      { $set: { isRead: true, readAt: new Date() } },
+      { $set: { isRead: true, readAt: new Date() } }
     );
 
-    res.send({
+    return res.send({
       success: true,
       message: "All notifications marked as read",
       modifiedCount: result.modifiedCount,
     });
   });
 
-  // Get Pending Pizza Requests
-  app.get("/admin/pending-pizzas", async (req, res) => {
+  // Get Pending Pizzas
+  app.get("/admin/pending-pizzas", ...admin, async (req, res) => {
     const pizzas = await pizzasCollection
       .find({ status: "pending" })
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.send(pizzas);
+    return res.send(pizzas);
   });
 
   // Approve Pizza
-  app.patch("/admin/pizzas/:id/approve", async (req, res) => {
-    if (!ObjectId.isValid(req.params.id)) {
-      return res.status(400).send({ success: false, message: "Invalid ID" });
+  app.patch("/admin/pizzas/:id/approve", ...admin, async (req, res) => {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid ID" });
     }
 
     const result = await pizzasCollection.updateOne(
-      { _id: new ObjectId(req.params.id), status: "pending" },
+      { _id: new ObjectId(id), status: "pending" },
       {
         $set: {
           status: "approved",
@@ -179,42 +176,55 @@ export default function adminRoutes(app, db) {
           rejectionReason: "",
           updatedAt: new Date(),
         },
-      },
+      }
     );
 
-    res.send({ success: true, message: "Pizza approved successfully", result });
+    return res.send({
+      success: true,
+      message: "Pizza approved successfully",
+      result,
+    });
   });
 
   // Reject Pizza
-  app.patch("/admin/pizzas/:id/reject", async (req, res) => {
-    if (!ObjectId.isValid(req.params.id)) {
-      return res.status(400).send({ success: false, message: "Invalid ID" });
+  app.patch("/admin/pizzas/:id/reject", ...admin, async (req, res) => {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid ID" });
     }
 
     const result = await pizzasCollection.updateOne(
-      { _id: new ObjectId(req.params.id), status: "pending" },
+      { _id: new ObjectId(id), status: "pending" },
       {
         $set: {
           status: "rejected",
           rejectionReason: req.body.rejectionReason?.trim() || "",
           updatedAt: new Date(),
         },
-      },
+      }
     );
 
-    res.send({ success: true, message: "Pizza rejected successfully", result });
+    return res.send({
+      success: true,
+      message: "Pizza rejected successfully",
+      result,
+    });
   });
 
   // Get All Users
-  app.get("/admin/users", async (req, res) => {
+  app.get("/admin/users", ...admin, async (req, res) => {
     const { role, search } = req.query;
     const filter = {};
 
     if (role) filter.role = role;
+
     if (search?.trim()) {
+      const regex = new RegExp(escapeRegex(search.trim()), "i");
+
       filter.$or = [
-        { name: { $regex: search.trim(), $options: "i" } },
-        { email: { $regex: search.trim(), $options: "i" } },
+        { name: regex },
+        { email: regex },
       ];
     }
 
@@ -223,107 +233,117 @@ export default function adminRoutes(app, db) {
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.send(users);
+    return res.send(users);
   });
 
   // Get Single User
-  app.get("/admin/users/:id", async (req, res) => {
-    if (!ObjectId.isValid(req.params.id)) {
+  app.get("/admin/users/:id", ...admin, async (req, res) => {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
       return res.status(400).send({ message: "Invalid user ID" });
     }
 
     const user = await usersCollection.findOne(
-      { _id: new ObjectId(req.params.id) },
-      { projection: { password: 0, token: 0 } },
+      { _id: new ObjectId(id) },
+      { projection: { password: 0, token: 0 } }
     );
 
-    res.send(user);
+    if (!user) {
+      return res.status(404).send({ message: "User not found" });
+    }
+
+    return res.send(user);
   });
 
   // Block User
-  app.patch("/admin/users/:id/block", async (req, res) => {
-    if (!ObjectId.isValid(req.params.id)) {
-      return res.status(400).send({ success: false, message: "Invalid ID" });
+  app.patch("/admin/users/:id/block", ...admin, async (req, res) => {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid ID" });
     }
 
     const result = await usersCollection.updateOne(
-      { _id: new ObjectId(req.params.id), role: { $ne: "admin" } },
-      { $set: { isBlocked: true, updatedAt: new Date() } },
+      { _id: new ObjectId(id), role: { $ne: "admin" } },
+      { $set: { isBlocked: true, updatedAt: new Date() } }
     );
 
-    res.send({ success: true, message: "User blocked successfully", result });
+    return res.send({
+      success: true,
+      message: "User blocked successfully",
+      result,
+    });
   });
 
   // Unblock User
-  app.patch("/admin/users/:id/unblock", async (req, res) => {
-    if (!ObjectId.isValid(req.params.id)) {
-      return res.status(400).send({ success: false, message: "Invalid ID" });
+  app.patch("/admin/users/:id/unblock", ...admin, async (req, res) => {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid ID" });
     }
 
     const result = await usersCollection.updateOne(
       {
-        _id: new ObjectId(req.params.id),
+        _id: new ObjectId(id),
         isBlocked: true,
         role: { $ne: "admin" },
       },
-      { $set: { isBlocked: false, updatedAt: new Date() } },
+      { $set: { isBlocked: false, updatedAt: new Date() } }
     );
 
-    res.send({ success: true, message: "User unblocked successfully", result });
+    return res.send({
+      success: true,
+      message: "User unblocked successfully",
+      result,
+    });
   });
 
-  // Update User Role (customer | vendor | admin)
-  app.patch("/admin/users/:id/role", async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { role } = req.body;
+  // Update User Role
+  app.patch("/admin/users/:id/role", ...admin, async (req, res) => {
+    const { id } = req.params;
+    const { role } = req.body;
 
-      if (!["customer", "vendor", "admin"].includes(role)) {
-        return res
-          .status(400)
-          .send({ success: false, message: "Invalid role" });
-      }
-
-      if (!ObjectId.isValid(id)) {
-        return res
-          .status(400)
-          .send({ success: false, message: "Invalid user ID" });
-      }
-
-      const result = await usersCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { role, updatedAt: new Date() } },
-      );
-
-      if (result.matchedCount === 0) {
-        return res
-          .status(404)
-          .send({ success: false, message: "User not found" });
-      }
-
-      res.send({
-        success: true,
-        message: `User role updated to ${role}`,
-        role,
-        result,
-      });
-    } catch (error) {
-      res.status(500).send({ success: false, message: error.message });
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid user ID" });
     }
+
+    if (!["customer", "vendor", "admin"].includes(role)) {
+      return res.status(400).send({ message: "Invalid role" });
+    }
+
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { role, updatedAt: new Date() } }
+    );
+
+    if (!result.matchedCount) {
+      return res.status(404).send({ message: "User not found" });
+    }
+
+    return res.send({
+      success: true,
+      message: `User role updated to ${role}`,
+      role,
+    });
   });
 
   // Get All Vendors
-  app.get("/admin/vendors", async (req, res) => {
+  app.get("/admin/vendors", ...admin, async (req, res) => {
     const { search = "", status = "All" } = req.query;
     const query = { role: "vendor" };
 
-    if (status && status !== "All") {
-      query.status = status;
-    }
+    if (status !== "All") query.status = status;
 
     if (search.trim()) {
-      const regex = new RegExp(search.trim(), "i");
-      query.$or = [{ companyName: regex }, { name: regex }, { email: regex }];
+      const regex = new RegExp(escapeRegex(search.trim()), "i");
+
+      query.$or = [
+        { companyName: regex },
+        { name: regex },
+        { email: regex },
+      ];
     }
 
     const vendors = await usersCollection
@@ -331,6 +351,44 @@ export default function adminRoutes(app, db) {
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.send(vendors);
+    return res.send(vendors);
+  });
+
+  // Admin Settings — একটাই doc
+  app.get("/admin/settings", ...admin, async (req, res) => {
+    try {
+      const doc = await settingsCollection.findOne({ _id: "admin" });
+
+      res.send({
+        profile: doc?.profile || {},
+        marketplace: doc?.marketplace || {},
+        notifications: doc?.notifications || {},
+      });
+    } catch (error) {
+      res.status(500).send({ message: "Failed to load settings" });
+    }
+  });
+
+  app.patch("/admin/settings", ...admin, async (req, res) => {
+    try {
+      const { profile, marketplace, notifications } = req.body || {};
+
+      await settingsCollection.updateOne(
+        { _id: "admin" },
+        {
+          $set: {
+            ...(profile ? { profile } : {}),
+            ...(marketplace ? { marketplace } : {}),
+            ...(notifications ? { notifications } : {}),
+            updatedAt: new Date(),
+          },
+        },
+        { upsert: true }
+      );
+
+      res.send({ success: true, message: "Settings saved" });
+    } catch (error) {
+      res.status(500).send({ message: "Failed to save settings" });
+    }
   });
 }

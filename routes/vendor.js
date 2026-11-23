@@ -1,9 +1,8 @@
+
 import { ObjectId } from "mongodb";
+import { requireAuth, requireAdmin } from "../middleware/authMiddleware.js";
 
-const escapeRegex = (str = "") =>
-  str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-const ALLOWED_ORDER_STATUSES = new Set([
+const ALLOWED_STATUSES = [
   "pending",
   "accepted",
   "approved",
@@ -13,291 +12,260 @@ const ALLOWED_ORDER_STATUSES = new Set([
   "rejected",
   "cancelled",
   "canceled",
-]);
+];
 
 export default function vendorRoutes(app, db) {
   const pizzasCollection = db.collection("pizzas");
   const ordersCollection = db.collection("orders");
+  const usersCollection = db.collection("user");
 
-  const buildVendorFilter = ({
-    email = "",
-    vendor = "",
-    shopName = "",
-    userId = "",
-  }) => {
-    const conditions = [];
-    const cleanEmail = String(email || "").trim();
-    const cleanVendor = String(vendor || "").trim();
-    const cleanShop = String(shopName || "").trim();
-    const cleanUserId = String(userId || "").trim();
+  const auth = requireAuth(db);
+  const admin = requireAdmin(db);
 
-    if (cleanEmail) {
-      const emailRegex = new RegExp(`^${escapeRegex(cleanEmail)}$`, "i");
-      conditions.push(
-        { vendorEmail: emailRegex },
-        { email: emailRegex },
-        { sellerEmail: emailRegex },
-        { ownerEmail: emailRegex },
-        { "items.vendorEmail": emailRegex },
-        { "items.email": emailRegex },
-        { "items.sellerEmail": emailRegex }
-      );
-    }
-
-    if (cleanVendor) {
-      const vendorRegex = new RegExp(escapeRegex(cleanVendor), "i");
-      conditions.push(
-        { vendor: vendorRegex },
-        { vendorName: vendorRegex },
-        { ownerName: vendorRegex },
-        { "items.vendor": vendorRegex },
-        { "items.vendorName": vendorRegex }
-      );
-    }
-
-    if (cleanShop) {
-      const shopRegex = new RegExp(escapeRegex(cleanShop), "i");
-      conditions.push(
-        { shopName: shopRegex },
-        { vendorShopName: shopRegex },
-        { "items.shopName": shopRegex },
-        { "items.vendorShopName": shopRegex }
-      );
-    }
-
-    if (cleanUserId) {
-      conditions.push(
-        { vendorId: cleanUserId },
-        { userId: cleanUserId },
-        { ownerId: cleanUserId },
-        { "items.vendorId": cleanUserId },
-        { "items.userId": cleanUserId }
-      );
-    }
-
-    return conditions.length > 0 ? { $or: conditions } : {};
-  };
-
-  const calculateOrderAmountForVendor = (order, email = "") => {
-    const cleanEmail = String(email || "").trim().toLowerCase();
-
-    if (Array.isArray(order.items) && order.items.length > 0 && cleanEmail) {
-      const matchedItems = order.items.filter((item) => {
-        const itemEmail = String(
-          item.vendorEmail || item.email || item.sellerEmail || ""
-        )
-          .trim()
-          .toLowerCase();
-        return itemEmail === cleanEmail;
-      });
-
-      if (matchedItems.length > 0) {
-        return matchedItems.reduce(
-          (sum, item) =>
-            sum +
-            Number(item.price ?? item.unitPrice ?? 0) *
-              Number(item.quantity ?? item.qty ?? 1),
-          0
-        );
-      }
-    }
-
-    return Number(order.totalPrice ?? order.totalAmount ?? order.amount ?? 0);
-  };
+  // Vendor Filter
+  const vendorFilter = (email) => ({
+    $or: [
+      { vendorEmail: email },
+      { "items.vendorEmail": email },
+    ],
+  });
 
   // Vendor Stats
-  app.get("/vendor/stats", async (req, res) => {
-    try {
-      const filter = buildVendorFilter(req.query);
+  app.get("/vendor/stats", auth, async (req, res) => {
+    const filter = vendorFilter(req.user.email);
 
-      const [pizzas, orders] = await Promise.all([
-        pizzasCollection.find(filter).toArray(),
-        ordersCollection.find(filter).toArray(),
-      ]);
+    const [pizzas, orders] = await Promise.all([
+      pizzasCollection.find(filter).toArray(),
+      ordersCollection.find(filter).toArray(),
+    ]);
 
-      const totalPizzas = pizzas.length;
-      const approvedPizzas = pizzas.filter(
-        (p) => String(p.status || "").trim().toLowerCase() === "approved"
-      ).length;
-      const pendingPizzas = pizzas.filter(
-        (p) =>
-          (String(p.status || "pending").trim().toLowerCase()) === "pending"
-      ).length;
-      const rejectedPizzas = pizzas.filter(
-        (p) => String(p.status || "").trim().toLowerCase() === "rejected"
-      ).length;
+    const deliveredOrders = orders.filter((o) =>
+      ["delivered", "completed"].includes(o.status?.toLowerCase())
+    );
 
-      const totalOrders = orders.length;
-      const pendingOrders = orders.filter((order) => {
-        const st = String(order.status || "pending").trim().toLowerCase();
-        return st === "pending" || st === "processing";
-      }).length;
+    return res.send({
+      totalPizzas: pizzas.length,
+      approvedPizzas: pizzas.filter((p) => p.status === "approved").length,
+      pendingPizzas: pizzas.filter((p) => !p.status || p.status === "pending").length,
+      rejectedPizzas: pizzas.filter((p) => p.status === "rejected").length,
+      totalOrders: orders.length,
+      pendingOrders: orders.filter((o) =>
+        ["pending", "processing"].includes(o.status?.toLowerCase() || "pending")
+      ).length,
+      completedOrders: deliveredOrders.length,
+      totalRevenue: deliveredOrders.reduce((sum, order) => {
+        const items = (order.items || []).filter(
+          (item) => item.vendorEmail === req.user.email
+        );
 
-      const deliveredOrders = orders.filter((order) => {
-        const st = String(order.status || "").trim().toLowerCase();
-        return st === "delivered" || st === "completed";
-      });
+        const amount = items.length
+          ? items.reduce(
+              (total, item) =>
+                total +
+                Number(item.price || 0) * Number(item.quantity || 1),
+              0
+            )
+          : Number(order.totalPrice || 0);
 
-      const completedOrders = deliveredOrders.length;
-
-      // Revenue শুধুমাত্র delivered/completed হওয়া অর্ডার থেকেই যোগ হবে
-      const totalRevenue = deliveredOrders.reduce(
-        (sum, order) => sum + calculateOrderAmountForVendor(order, req.query.email),
-        0
-      );
-
-      res.send({
-        totalPizzas,
-        approvedPizzas,
-        pendingPizzas,
-        rejectedPizzas,
-        totalOrders,
-        pendingOrders,
-        completedOrders,
-        totalRevenue,
-      });
-    } catch (error) {
-      res.status(500).send({
-        message: "Failed to fetch vendor stats",
-        error: error.message,
-      });
-    }
-  });
-
-  // Vendor Pizzas
-  app.get("/vendor/pizzas", async (req, res) => {
-    try {
-      const filter = buildVendorFilter(req.query);
-      const pizzas = await pizzasCollection
-        .find(filter)
-        .sort({ createdAt: -1 })
-        .toArray();
-
-      res.send(pizzas);
-    } catch (error) {
-      res.status(500).send({
-        message: "Failed to fetch vendor pizzas",
-        error: error.message,
-      });
-    }
-  });
-
-  // Create Vendor Pizza
-  app.post("/vendor/pizzas", async (req, res) => {
-    try {
-      const newPizza = {
-        ...req.body,
-        status: "pending",
-        isActive: req.body.isAvailable !== false,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-
-      const result = await pizzasCollection.insertOne(newPizza);
-
-      res.status(201).send({
-        success: true,
-        insertedId: result.insertedId,
-        pizza: { ...newPizza, _id: result.insertedId },
-      });
-    } catch (error) {
-      res.status(500).send({
-        success: false,
-        message: "Failed to create pizza",
-        error: error.message,
-      });
-    }
-  });
-
-  // Delete Vendor Pizza
-  app.delete("/vendor/pizzas/:id", async (req, res) => {
-    try {
-      const { id } = req.params;
-      if (!ObjectId.isValid(id)) {
-        return res
-          .status(400)
-          .send({ success: false, message: "Invalid pizza ID" });
-      }
-
-      const result = await pizzasCollection.deleteOne({
-        _id: new ObjectId(id),
-      });
-      res.send({ success: result.deletedCount > 0, result });
-    } catch (error) {
-      res.status(500).send({
-        success: false,
-        message: "Failed to delete pizza",
-        error: error.message,
-      });
-    }
+        return sum + amount;
+      }, 0),
+    });
   });
 
   // Vendor Orders
-  app.get("/vendor/orders", async (req, res) => {
-    try {
-      const filter = buildVendorFilter(req.query);
-      const orders = await ordersCollection
-        .find(filter)
-        .sort({ createdAt: -1 })
-        .toArray();
+  app.get("/vendor/orders", auth, async (req, res) => {
+    const orders = await ordersCollection
+      .find(vendorFilter(req.user.email))
+      .sort({ createdAt: -1 })
+      .toArray();
 
-      res.send(orders);
-    } catch (error) {
-      res.status(500).send({
-        message: "Failed to fetch vendor orders",
-        error: error.message,
-      });
-    }
+    return res.send(orders);
   });
 
-  // Update Order Status (e.g. accepted -> delivered)
-  app.patch("/vendor/orders/:id/status", async (req, res) => {
+  // Update Order Status
+  app.patch("/vendor/orders/:id/status", auth, async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid order ID" });
+    }
+
+    if (!ALLOWED_STATUSES.includes(status)) {
+      return res.status(400).send({ message: "Invalid order status" });
+    }
+
+    const filter = { _id: new ObjectId(id) };
+
+    if (req.user.role !== "admin") {
+      filter.$or = vendorFilter(req.user.email).$or;
+    }
+
+    const order = await ordersCollection.findOne(filter);
+
+    if (!order) {
+      return res.status(404).send({ message: "Order not found" });
+    }
+
+    const now = new Date();
+
+    await ordersCollection.updateOne(filter, {
+      $set: {
+        status,
+        updatedAt: now,
+        ...(status === "delivered" ? { deliveredAt: now } : {}),
+      },
+    });
+
+    return res.send({
+      success: true,
+      message: "Order status updated",
+    });
+  });
+
+  // Vendor Subscription / Plan info
+  app.get("/vendor/subscription", auth, async (req, res) => {
     try {
-      const { id } = req.params;
-      if (!ObjectId.isValid(id)) {
-        return res
-          .status(400)
-          .send({ success: false, message: "Invalid order ID" });
-      }
-
-      const nextStatus = String(req.body?.status || "").trim().toLowerCase();
-      if (!ALLOWED_ORDER_STATUSES.has(nextStatus)) {
-        return res
-          .status(400)
-          .send({ success: false, message: "Invalid order status" });
-      }
-
+      const email = String(req.user?.email || "").trim().toLowerCase();
       const now = new Date();
-      const updateDoc = {
-        $set: {
-          status: nextStatus,
-          updatedAt: now,
-          ...(nextStatus === "delivered" ? { deliveredAt: now } : {}),
-        },
-      };
+      const FREE_LIMIT = 3;
+      const PRICE = 30000;
+      const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
 
-      const result = await ordersCollection.updateOne(
-        { _id: new ObjectId(id) },
-        updateDoc
-      );
+      const vendor = await usersCollection.findOne({
+        email: { $regex: `^${email}$`, $options: "i" },
+      });
 
-      if (result.matchedCount === 0) {
-        return res
-          .status(404)
-          .send({ success: false, message: "Order not found" });
+      if (!vendor) {
+        return res.status(404).send({
+          success: false,
+          message: "Vendor not found",
+        });
       }
+
+      // পুরনো vendor-দের জন্য trial backfill (feature আসার আগে approve হওয়া)
+      if (
+        !vendor.subscriptionExpiresAt &&
+        !vendor.trialEndsAt &&
+        vendor.subscriptionPlan !== "premium"
+      ) {
+        const trialEnd = new Date(now.getTime() + MONTH_MS);
+        await usersCollection.updateOne(
+          { _id: vendor._id },
+          {
+            $set: {
+              subscriptionPlan: "free",
+              subscriptionStartedAt: now,
+              trialEndsAt: trialEnd,
+              updatedAt: now,
+            },
+          }
+        );
+        vendor.subscriptionPlan = "free";
+        vendor.subscriptionStartedAt = now;
+        vendor.trialEndsAt = trialEnd;
+      }
+
+      const expiresAt = vendor.subscriptionExpiresAt
+        ? new Date(vendor.subscriptionExpiresAt)
+        : null;
+      const trialEndsAt = vendor.trialEndsAt
+        ? new Date(vendor.trialEndsAt)
+        : null;
+
+      const isPremium =
+        vendor.subscriptionPlan === "premium" &&
+        expiresAt &&
+        expiresAt > now;
+
+      const trialActive = !isPremium && (!trialEndsAt || trialEndsAt > now);
+      const trialEnded = !isPremium && trialEndsAt && trialEndsAt <= now;
+
+      const pizzaCount = await pizzasCollection.countDocuments({
+        vendorEmail: email,
+        isAvailable: true,
+        status: { $in: ["approved", "pending"] },
+      });
+
+      const canAddPizza =
+        isPremium || (trialActive && pizzaCount < FREE_LIMIT);
+
+      const nextRenewalDate = isPremium
+        ? expiresAt
+        : trialActive
+          ? trialEndsAt
+          : null;
 
       res.send({
         success: true,
-        status: nextStatus,
-        message: `Order status updated to ${nextStatus}`,
+        plan: isPremium ? "premium" : "free",
+        status: isPremium
+          ? "premium_active"
+          : trialActive
+            ? "trial"
+            : "trial_expired",
+        price: PRICE,
+        currency: "BDT",
+        billingDays: 30,
+        freeLimit: FREE_LIMIT,
+        pizzaCount,
+        canAddPizza,
+        trialEndsAt: trialEndsAt || null,
+        trialDaysLeft: trialEndsAt
+          ? Math.max(
+              0,
+              Math.ceil((trialEndsAt.getTime() - now.getTime()) / 86400000)
+            )
+          : 0,
+        subscriptionStartedAt: vendor.subscriptionStartedAt || null,
+        subscriptionExpiresAt: expiresAt || null,
+        subscriptionPaidAt: vendor.subscriptionPaidAt || null,
+        daysLeft: expiresAt
+          ? Math.max(
+              0,
+              Math.ceil((expiresAt.getTime() - now.getTime()) / 86400000)
+            )
+          : 0,
+        nextRenewalDate,
+        nextPayment:
+          isPremium && expiresAt
+            ? { amount: PRICE, dueAt: expiresAt, currency: "BDT" }
+            : null,
       });
     } catch (error) {
       res.status(500).send({
         success: false,
-        message: "Failed to update order status",
-        error: error.message,
+        message: "Failed to load subscription",
       });
     }
+  });
+
+  // Admin: All Vendors
+  app.get("/admin/vendors", ...admin, async (req, res) => {
+    const { search = "", status = "All" } = req.query;
+
+    const query = { role: "vendor" };
+
+    if (status !== "All") query.status = status;
+
+    if (search.trim()) {
+      const regex = new RegExp(
+        search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+        "i"
+      );
+
+      query.$or = [
+        { companyName: regex },
+        { name: regex },
+        { email: regex },
+      ];
+    }
+
+    const vendors = await usersCollection
+      .find(query, { projection: { password: 0, token: 0 } })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.send(vendors);
   });
 }

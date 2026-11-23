@@ -1,11 +1,22 @@
 import { ObjectId } from "mongodb";
+import {
+  requireAuth,
+  requireCustomer,
+} from "../middleware/authMiddleware.js";
 
 export default function orderRoutes(app, db) {
   const ordersCollection = db.collection("orders");
+  const pizzasCollection = db.collection("pizzas");
   const notificationsCollection = db.collection("notifications");
 
+  const auth = requireAuth(db);
+  const customer = requireCustomer(db);
+
+  const escapeRegex = (value = "") =>
+    value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
   // Get All Orders
-  app.get("/orders", async (req, res) => {
+  app.get("/orders", auth, async (req, res) => {
     try {
       const {
         search = "",
@@ -13,21 +24,45 @@ export default function orderRoutes(app, db) {
         vendor = "",
         vendorEmail = "",
       } = req.query;
+
+      const role = String(req.user.role || "").toLowerCase();
       const query = {};
 
-      if (status && status !== "All") query.status = status;
-      if (vendor.trim()) query.vendor = new RegExp(vendor.trim(), "i");
-      if (vendorEmail.trim())
-        query.vendorEmail = vendorEmail.trim().toLowerCase();
-
-      if (search.trim()) {
-        const regex = new RegExp(search.trim(), "i");
+      if (role === "vendor") {
         query.$or = [
-          { orderId: regex },
-          { customerName: regex },
-          { customerEmail: regex },
-          { phone: regex },
-          { vendor: regex },
+          { vendorEmail: req.user.email },
+          { "items.vendorEmail": req.user.email },
+        ];
+      } else if (role === "customer") {
+        query.customerEmail = req.user.email;
+      }
+
+      if (status !== "All") query.status = status;
+
+      if (vendor) {
+        query.vendor = {
+          $regex: escapeRegex(vendor),
+          $options: "i",
+        };
+      }
+
+      if (vendorEmail && role === "admin") {
+        query.vendorEmail = vendorEmail.toLowerCase();
+      }
+
+      if (search) {
+        const regex = new RegExp(escapeRegex(search), "i");
+
+        query.$and = [
+          {
+            $or: [
+              { orderId: regex },
+              { customerName: regex },
+              { customerEmail: regex },
+              { phone: regex },
+              { vendor: regex },
+            ],
+          },
         ];
       }
 
@@ -38,86 +73,151 @@ export default function orderRoutes(app, db) {
 
       res.send(orders);
     } catch (error) {
-      res
-        .status(500)
-        .send({ message: "Failed to fetch orders", error: error.message });
+      res.status(500).send({
+        message: "Failed to fetch orders",
+      });
     }
   });
 
-  // Get Single Order by Mongo _id or orderId (e.g. PZ-123456)
-  app.get("/orders/:orderId", async (req, res) => {
+  // Get Single Order
+  app.get("/orders/:orderId", auth, async (req, res) => {
     try {
       const { orderId } = req.params;
-      let order = null;
 
-      if (ObjectId.isValid(orderId)) {
-        order = await ordersCollection.findOne({ _id: new ObjectId(orderId) });
-      }
+      const order = await ordersCollection.findOne({
+        $or: [
+          ...(ObjectId.isValid(orderId)
+            ? [{ _id: new ObjectId(orderId) }]
+            : []),
+          { orderId },
+        ],
+      });
 
       if (!order) {
-        order = await ordersCollection.findOne({ orderId });
+        return res.status(404).send({
+          message: "Order not found",
+        });
       }
 
-      if (!order) {
-        return res.status(404).send({ message: "Order not found" });
+      const role = String(req.user.role || "").toLowerCase();
+
+      const isAdmin = role === "admin";
+      const isCustomer = order.customerEmail === req.user.email;
+      const isVendor =
+        order.vendorEmail === req.user.email ||
+        order.items?.some(
+          (item) => item.vendorEmail === req.user.email
+        );
+
+      if (!isAdmin && !isCustomer && !isVendor) {
+        return res.status(403).send({
+          message: "Access denied",
+        });
       }
 
       res.send(order);
     } catch (error) {
-      res
-        .status(500)
-        .send({
-          message: "Failed to fetch order details",
-          error: error.message,
-        });
+      res.status(500).send({
+        message: "Failed to fetch order",
+      });
     }
   });
 
-  // Create New Order (COD & Stripe)
-  app.post("/orders", async (req, res) => {
+  // Create New Order
+  app.post("/orders", customer, async (req, res) => {
     try {
       const {
         items = [],
-        subtotal = 0,
-        deliveryFee = 0,
-        total = 0,
         phone = "",
         address = "",
+        deliveryDate = "",
         paymentMethod = "cod",
-        paymentStatus = "unpaid",
-        sessionId = "",
-        customerEmail = "",
-        customerName = "Customer",
       } = req.body;
 
-      // Stripe page refresh korle jeno duplicate order na hoy
-      if (sessionId) {
-        const existing = await ordersCollection.findOne({ sessionId });
-        if (existing) {
-          return res.send({ success: true, order: existing, duplicate: true });
-        }
+      if (!Array.isArray(items) || !items.length) {
+        return res.status(400).send({
+          message: "Please add at least one pizza",
+        });
       }
 
+      if (!phone.trim() || !address.trim()) {
+        return res.status(400).send({
+          message: "Phone and address are required",
+        });
+      }
+
+      const pizzaItems = [];
+
+      for (const item of items) {
+        const pizzaId = item.pizzaId || item._id || item.id;
+        // কার্ট item-এ `qty` আছে, পুরোনো data-তে `quantity` — দুটোই চলবে
+        const quantity = Number(item.quantity ?? item.qty);
+
+        if (!ObjectId.isValid(String(pizzaId)) || !Number.isInteger(quantity) || quantity < 1) {
+          return res.status(400).send({
+            message: "Invalid order item",
+          });
+        }
+
+        const pizza = await pizzasCollection.findOne({
+          _id: new ObjectId(String(pizzaId)),
+          status: "approved",
+        });
+
+        if (!pizza || pizza.isAvailable === false) {
+          return res.status(400).send({
+            message: "One or more pizzas are unavailable",
+          });
+        }
+
+        const price = Number(pizza.discountPrice || pizza.price);
+
+        if (!Number.isFinite(price) || price <= 0) {
+          return res.status(400).send({
+            message: "Invalid pizza price",
+          });
+        }
+
+        pizzaItems.push({
+          pizzaId: pizza._id,
+          name: pizza.name,
+          image: pizza.image,
+          price,
+          quantity,
+          vendor: pizza.vendor || "",
+          vendorEmail: pizza.vendorEmail || "",
+        });
+      }
+
+      const subtotal = pizzaItems.reduce(
+        (sum, item) => sum + item.price * item.quantity,
+        0
+      );
+
+      const deliveryFee = 60;
+      const total = subtotal + deliveryFee;
+
       const now = new Date();
-      const orderId =
-        req.body.orderId || `PZ-${Math.floor(100000 + Math.random() * 900000)}`;
+      const orderId = `PZ-${Date.now()}-${Math.floor(
+        1000 + Math.random() * 9000
+      )}`;
 
       const orderData = {
         orderId,
-        customerName,
-        customerEmail: customerEmail.trim().toLowerCase(),
-        phone: String(phone).trim(),
-        address: String(address).trim(),
-        items,
-        subtotal: Number(subtotal),
-        deliveryFee: Number(deliveryFee),
-        total: Number(total),
+        customerName: req.user.name || "Customer",
+        customerEmail: req.user.email,
+        phone: phone.trim(),
+        address: address.trim(),
+        deliveryDate: String(deliveryDate).trim(),
+        items: pizzaItems,
+        subtotal,
+        deliveryFee,
+        total,
         paymentMethod,
-        paymentStatus,
-        ...(sessionId ? { sessionId } : {}),
-        status: req.body.status || "Pending Admin Review",
-        vendor: req.body.vendor || "",
-        vendorEmail: (req.body.vendorEmail || "").trim().toLowerCase(),
+        paymentStatus: "unpaid",
+        status: "Pending Admin Review",
+        vendor: "",
+        vendorEmail: "",
         createdAt: now,
         updatedAt: now,
       };
@@ -128,7 +228,7 @@ export default function orderRoutes(app, db) {
         recipientRole: "admin",
         type: "new_order",
         title: "New Order Received",
-        message: `Order ${orderId} (৳${orderData.total} - ${paymentMethod.toUpperCase()}) received.`,
+        message: `Order ${orderId} (৳${total}) received.`,
         orderId: result.insertedId,
         isRead: false,
         createdAt: now,
@@ -137,51 +237,77 @@ export default function orderRoutes(app, db) {
       res.status(201).send({
         success: true,
         insertedId: result.insertedId,
-        order: { ...orderData, _id: result.insertedId },
+        order: {
+          ...orderData,
+          _id: result.insertedId,
+        },
       });
     } catch (error) {
-      res
-        .status(500)
-        .send({ message: "Failed to create order", error: error.message });
+      console.error("Create Order Error:", error.message);
+
+      res.status(500).send({
+        message: "Failed to create order",
+      });
     }
   });
 
-  // Update Order Status / Transfer to Vendor -> Notify Vendor
-  app.patch("/orders/:id/status", async (req, res) => {
+  // Update Order Status (Admin)
+  app.patch("/orders/:id/status", ...admin, async (req, res) => {
     try {
       const { id } = req.params;
+      const { status, vendor, vendorEmail } = req.body;
+
       if (!ObjectId.isValid(id)) {
-        return res
-          .status(400)
-          .send({ success: false, message: "Invalid order ID" });
+        return res.status(400).send({
+          message: "Invalid order ID",
+        });
       }
 
-      const existingOrder = await ordersCollection.findOne({
+      const allowedStatuses = [
+        "Pending Admin Review",
+        "Accepted",
+        "Processing",
+        "Preparing",
+        "On the Way",
+        "Delivered",
+        "Rejected",
+        "Cancelled",
+      ];
+
+      if (status && !allowedStatuses.includes(status)) {
+        return res.status(400).send({
+          message: "Invalid order status",
+        });
+      }
+
+      const order = await ordersCollection.findOne({
         _id: new ObjectId(id),
       });
-      if (!existingOrder) {
-        return res
-          .status(404)
-          .send({ success: false, message: "Order not found" });
+
+      if (!order) {
+        return res.status(404).send({
+          message: "Order not found",
+        });
       }
 
-      const { status, vendor, vendorEmail } = req.body;
-      const now = new Date();
-      const updateFields = { updatedAt: now };
+      const updateFields = {
+        updatedAt: new Date(),
+        ...(status ? { status } : {}),
+        ...(vendor !== undefined
+          ? { vendor: String(vendor).trim() }
+          : {}),
+        ...(vendorEmail !== undefined
+          ? { vendorEmail: String(vendorEmail).trim().toLowerCase() }
+          : {}),
+      };
 
-      if (status) updateFields.status = status;
-      if (vendor !== undefined) updateFields.vendor = String(vendor).trim();
-      if (vendorEmail !== undefined) {
-        updateFields.vendorEmail = String(vendorEmail).trim().toLowerCase();
-      }
-
-      const result = await ordersCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: updateFields },
+      await ordersCollection.updateOne(
+        { _id: order._id },
+        { $set: updateFields }
       );
 
       const assignedEmail =
-        updateFields.vendorEmail || existingOrder.vendorEmail || "";
+        updateFields.vendorEmail || order.vendorEmail;
 
       if (assignedEmail) {
         await notificationsCollection.insertOne({
@@ -189,45 +315,101 @@ export default function orderRoutes(app, db) {
           recipientEmail: assignedEmail,
           type: "order_transferred",
           title: "New Order Transferred",
-          message: `Order ${existingOrder.orderId || id} has been assigned to your kitchen.`,
-          orderId: existingOrder._id,
+          message: `Order ${order.orderId} has been assigned to your kitchen.`,
+          orderId: order._id,
           isRead: false,
-          createdAt: now,
+          createdAt: new Date(),
         });
       }
 
-      res.send({ success: true, result });
+      res.send({
+        success: true,
+        message: "Order updated successfully",
+      });
     } catch (error) {
-      res
-        .status(500)
-        .send({ message: "Failed to update order", error: error.message });
+      res.status(500).send({
+        message: "Failed to update order",
+      });
     }
   });
 
-  // Delete Order
-  app.delete("/orders/:id", async (req, res) => {
+  // Delete Order (Admin)
+  app.delete("/orders/:id", ...admin, async (req, res) => {
     try {
       const { id } = req.params;
+
       if (!ObjectId.isValid(id)) {
-        return res
-          .status(400)
-          .send({ success: false, message: "Invalid order ID" });
+        return res.status(400).send({
+          message: "Invalid order ID",
+        });
       }
 
       const result = await ordersCollection.deleteOne({
         _id: new ObjectId(id),
       });
-      if (result.deletedCount === 0) {
-        return res
-          .status(404)
-          .send({ success: false, message: "Order not found" });
+
+      if (!result.deletedCount) {
+        return res.status(404).send({
+          message: "Order not found",
+        });
       }
 
-      res.send({ success: true, message: "Order deleted successfully" });
+      res.send({
+        success: true,
+        message: "Order deleted successfully",
+      });
     } catch (error) {
-      res
-        .status(500)
-        .send({ message: "Failed to delete order", error: error.message });
+      res.status(500).send({
+        message: "Failed to delete order",
+      });
+    }
+  });
+
+  // Customer নিজের order cancel — শুধু নিজের order
+  app.patch("/orders/:orderId/cancel", auth, async (req, res) => {
+    try {
+      const { orderId } = req.params;
+
+      const query = ObjectId.isValid(orderId)
+        ? { $or: [{ _id: new ObjectId(orderId) }, { orderId }] }
+        : { orderId };
+
+      const order = await ordersCollection.findOne(query);
+
+      if (!order) {
+        return res.status(404).send({ message: "Order not found" });
+      }
+
+      const isAdmin =
+        String(req.user?.role || "").toLowerCase() === "admin";
+      const isOwner = order.customerEmail === req.user?.email;
+
+      if (!isAdmin && !isOwner) {
+        return res.status(403).send({ message: "Access denied" });
+      }
+
+      const cancellable = ["pending", "pending admin review", "accepted"];
+
+      if (
+        !cancellable.includes(
+          String(order.status || "").trim().toLowerCase()
+        )
+      ) {
+        return res.status(400).send({
+          message: "This order can no longer be cancelled",
+        });
+      }
+
+      const now = new Date();
+
+      await ordersCollection.updateOne(
+        { _id: order._id },
+        { $set: { status: "Cancelled", updatedAt: now } }
+      );
+
+      res.send({ success: true, message: "Order cancelled" });
+    } catch (error) {
+      res.status(500).send({ message: "Failed to cancel order" });
     }
   });
 }
